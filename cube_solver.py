@@ -3,7 +3,7 @@ import logging
 import kociemba
 import serial
 import time
-from color_detection import ColorDetector, manual_input
+from color_detection import ColorDetector
 
 class CubeSolver:
     def __init__(self, arduino_port='COM3', baud_rate=9600):
@@ -92,37 +92,32 @@ class CubeSolver:
     def run(self):
         """Main execution flow"""
         try:
-            # Calibrate colors
-            logging.info("Starting color calibration...")
-            if not self.color_detector.calibrate_all_colors():
-                logging.error("Calibration failed.")
-                return
-            logging.info("Calibration complete.")
-            
             # Process each side of the cube
             cube_state = []
-            sides = ['Up', 'Right', 'Front', 'Down', 'Left', 'Back']
+            faces = [
+                ("White face", "W"),
+                ("Red face", "R"),
+                ("Green face", "G"),
+                ("Yellow face", "Y"),
+                ("Orange face", "O"),
+                ("Blue face", "B")
+            ]
             
             use_manual_input = input("Do you want to manually input the cube colors? (Y/N): ").strip().upper()
 
-            for side in sides:
+            for face_name, center_color in faces:
                 if use_manual_input == 'Y':
-                    logging.info(f"\nManually inputting the {side} side of the cube.")
-                    cube_state += manual_input()
+                    logging.info(f"\nManually inputting the {face_name}")
+                    colors = self.color_detector.manual_input()  # Using the static method from ColorDetector
+                    colors[4] = center_color  # Ensure center color is correct
+                    cube_state.extend(colors)
                 else:
-                    logging.info(f"\nPrepare to show the {side} side of the cube.")
-                    colors = self.color_detector.scan_cube_face()
+                    logging.info(f"\nPrepare to show the {face_name}")
+                    colors = self.color_detector.scan_cube_face(face_name, center_color)
                     if colors is None:
                         logging.error("Failed to scan cube face.")
                         return
-                    
-                    confirm = input("Are the colors correct? (Y/N): ").strip().upper()
-                    if confirm != 'Y':
-                        logging.info("Rescan the side.")
-                        side -= 1  # Redo this side
-                        continue
-                    
-                    cube_state += colors
+                    cube_state.extend(colors)
             
             # Solve and execute
             logging.info("Detected cube state: %s", ''.join(cube_state))
