@@ -1,3 +1,4 @@
+# color_detection.py
 import cv2
 import numpy as np
 import logging
@@ -224,39 +225,21 @@ class ColorDetector:
             colors, frame_with_colors = self.detect_cube_colors(frame.copy(), center_color)
             
             # Add instructions
-            cv2.putText(frame_with_colors, f"Align face with {face_name} in the middle", 
+            cv2.putText(frame_with_colors, f"Scanning {face_name}", 
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            cv2.putText(frame_with_colors, "Press SPACE to capture or ESC to quit", 
+            cv2.putText(frame_with_colors, "Press SPACE to capture, ESC to quit", 
                        (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
             
             # Show the frame
             cv2.imshow('Cube Face Detection', frame_with_colors)
             
-            # Handle key presses
             key = cv2.waitKey(1) & 0xFF
             if key == 27:  # ESC key
                 cv2.destroyAllWindows()
                 return None
-            elif key == 32:  # SPACE key
+            elif key == ord(' '):  # Space key
                 cv2.destroyAllWindows()
-                
-                # Ask for confirmation
-                print("\nDetected colors:")
-                self.display_colors(colors)
-                while True:
-                    choice = input("\nChoose action:\n1. Accept and continue\n2. Retry scan\n3. Manual input\nChoice (1/2/3): ").strip()
-                    if choice in ['1', '2', '3']:
-                        break
-                
-                if choice == '1':
-                    return colors
-                elif choice == '2':
-                    continue
-                else:  # choice == '3'
-                    colors = self.manual_input()
-                    # Ensure center color is correct even in manual input
-                    colors[4] = center_color  # Position 4 is the center (0-based indexing)
-                    return colors
+                return colors
 
     @staticmethod
     def display_colors(colors):
@@ -310,3 +293,173 @@ def test_color_detection():
 
 if __name__ == "__main__":
     test_color_detection()
+
+# cube_solver.py
+import logging
+import kociemba
+import serial
+import time
+from color_detection import ColorDetector
+
+class CubeSolver:
+    def __init__(self, arduino_port='COM3', baud_rate=9600):
+        self.arduino_port = arduino_port
+        self.baud_rate = baud_rate
+        self.color_detector = ColorDetector()
+
+    def initialize(self):
+        """Initialize the system"""
+        return self.color_detector.initialize_camera()
+
+    def cleanup(self):
+        """Clean up resources"""
+        self.color_detector.release_camera()
+
+    def solve_cube(self, cube_state):
+        """Solve the cube using Kociemba algorithm"""
+        try:
+            kociemba_state = self._convert_to_kociemba_format(cube_state)
+            solution = kociemba.solve(kociemba_state)
+            return solution
+        except Exception as e:
+            logging.error(f"Error solving cube: {e}")
+            return None
+
+    @staticmethod
+    def _convert_to_kociemba_format(cube_state):
+        """Convert our color format to Kociemba format"""
+        color_mapping = {
+            'W': 'U', 'R': 'R', 'G': 'F',
+            'Y': 'D', 'O': 'L', 'B': 'B'
+        }
+        return ''.join(color_mapping[c] for c in cube_state)
+
+    def send_to_arduino(self, solution):
+        """Send solution to Arduino"""
+        try:
+            with serial.Serial(self.arduino_port, self.baud_rate, timeout=1) as ser:
+                logging.info("Connecting to Arduino...")
+                time.sleep(2)  # Wait for Arduino to reset
+                
+                # Wait for Arduino to be ready
+                while True:
+                    if ser.in_waiting:
+                        response = ser.readline().decode().strip()
+                        logging.info(f"Arduino: {response}")
+                        if response == "READY":
+                            break
+                logging.info("Arduino is ready. Sending calibration command...")
+                ser.write(b"CALIBRATE\n")
+                
+                # Wait for calibration to complete
+                while True:
+                    if ser.in_waiting:
+                        response = ser.readline().decode().strip()
+                        logging.info(f"Arduino: {response}")
+                        if response == "CALIBRATION_COMPLETE":
+                            break
+                
+                logging.info("Calibration complete. Sending solution...")
+                moves = solution.split()
+                for move in moves:
+                    logging.info(f"Sending move: {move}")
+                    ser.write(f"{move}\n".encode())
+                    
+                    # Wait for move to complete
+                    while True:
+                        if ser.in_waiting:
+                            response = ser.readline().decode().strip()
+                            logging.info(f"Arduino: {response}")
+                            if response.startswith("MOVE_COMPLETE"):
+                                break
+                            elif response.startswith("ERROR"):
+                                logging.error(f"Error occurred: {response}")
+                                return False
+                    
+                    time.sleep(0.1)  # Small delay between moves
+            
+            logging.info("Solution sent to Arduino successfully.")
+            return True
+        except serial.SerialException as e:
+            logging.error(f"Error communicating with Arduino: {e}")
+            return False
+
+    def run(self):
+        """Main execution flow"""
+        try:
+            # Process each side of the cube
+            cube_state = []
+            faces = [
+                ("White face", "W"),
+                ("Red face", "R"),
+                ("Green face", "G"),
+                ("Yellow face", "Y"),
+                ("Orange face", "O"),
+                ("Blue face", "B")
+            ]
+            
+            for face_name, center_color in faces:
+                while True:
+                    logging.info(f"\nScanning {face_name}...")
+                    print(f"\nPosition the cube with the {face_name} center facing the camera")
+                    colors = self.color_detector.scan_cube_face(face_name, center_color)
+                    
+                    if colors is None:  # User pressed ESC
+                        logging.info("Scanning cancelled.")
+                        return
+                    
+                    print("\nDetected colors:")
+                    self.color_detector.display_colors(colors)
+                    
+                    while True:
+                        choice = input("\nChoose action:\n1. Proceed with detected colors\n2. Retry scan\n3. Manual input\n4. Quit\nChoice (1/2/3/4): ").strip()
+                        if choice in ['1', '2', '3', '4']:
+                            break
+                        print("Invalid choice. Please try again.")
+                    
+                    if choice == '1':  # Proceed
+                        cube_state.extend(colors)
+                        break
+                    elif choice == '2':  # Retry
+                        continue
+                    elif choice == '3':  # Manual input
+                        print(f"\nEnter colors for {face_name} (use R,O,Y,G,B,W):")
+                        colors = self.color_detector.manual_input()
+                        colors[4] = center_color  # Ensure center color is correct
+                        cube_state.extend(colors)
+                        break
+                    else:  # Quit
+                        logging.info("Program terminated by user.")
+                        return
+                    
+                if choice == '4':  # If user chose to quit
+                    return
+            
+            if len(cube_state) == 54:  # Complete cube
+                # Solve and execute
+                logging.info("Detected cube state: %s", ''.join(cube_state))
+                solution = self.solve_cube(cube_state)
+                
+                if solution:
+                    logging.info(f"Solution: {solution}")
+                    self.send_to_arduino(solution)
+                else:
+                    logging.error("Failed to find a solution.")
+            else:
+                logging.error("Incomplete cube state detected.")
+        
+        except Exception as e:
+            logging.error(f"An unexpected error occurred: {e}")
+
+def main():
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Create and run solver
+    solver = CubeSolver()
+    if solver.initialize():
+        solver.run()
+    solver.cleanup()
+
+if __name__ == "__main__":
+    main()
